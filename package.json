@@ -39,5 +39,14 @@
   "license": "MIT",
   "publishConfig": {
     "access": "public"
+  },
+  "author": "Tom Koch",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tomck/powercode-node-mcp.git"
+  },
+  "homepage": "https://github.com/tomck/powercode-node-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/tomck/powercode-node-mcp/issues"
   }
 }
