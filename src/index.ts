@@ -6,13 +6,13 @@ import { z } from "zod";
 // Config comes from env vars so nothing secret lives in the client config file's args.
 const host = process.env.POWERCODE_HOST;
 const port = process.env.POWERCODE_PORT ?? "444";
-const apiKey = process.env.POWERCODE_API_KEY; // base64 of "username:password"
+const apiKey = process.env.POWERCODE_API_KEY; // raw key from the admin portal; base64-encoded below
 const username = process.env.POWERCODE_USERNAME;
 const password = process.env.POWERCODE_PASSWORD;
 
 if (!host || !(apiKey || (username && password))) {
   console.error(
-    "Set POWERCODE_HOST and either POWERCODE_API_KEY (base64) or POWERCODE_USERNAME + POWERCODE_PASSWORD."
+    "Set POWERCODE_HOST and either POWERCODE_API_KEY or POWERCODE_USERNAME + POWERCODE_PASSWORD."
   );
   process.exit(1);
 }
@@ -23,7 +23,7 @@ if (process.env.POWERCODE_INSECURE_TLS === "1") {
 }
 
 const authHeader =
-  "Basic " + (apiKey ?? Buffer.from(`${username}:${password}`).toString("base64"));
+  "Basic " + Buffer.from(apiKey ?? `${username}:${password}`).toString("base64");
 const baseUrl = `https://${host}:${port}/uapi`;
 
 type Param = string | number | boolean | (string | number)[] | undefined;

@@ -8,7 +8,7 @@ Read-only MCP server for the [Powercode REST API](https://restapi.powercode.com/
 |---|---|
 | `POWERCODE_HOST` | Your Powercode server hostname (required) |
 | `POWERCODE_PORT` | Default `444` |
-| `POWERCODE_API_KEY` | Base64 of `username:password`, **or** use the two below |
+| `POWERCODE_API_KEY` | The API key exactly as shown in the admin portal (the server base64-encodes it), **or** use the two below |
 | `POWERCODE_USERNAME` / `POWERCODE_PASSWORD` | Alternative to the API key |
 | `POWERCODE_INSECURE_TLS` | Set to `1` to accept a self-signed certificate |
 | `POWERCODE_ENABLE_WRITES` | Set to `1` to expose the write tools (off by default) |
