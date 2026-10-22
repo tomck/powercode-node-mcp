@@ -1,5 +1,13 @@
 # powercode-mcp
 
+[![npm version](https://img.shields.io/npm/v/powercode-mcp)](https://www.npmjs.com/package/powercode-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/powercode-mcp)](https://www.npmjs.com/package/powercode-mcp)
+[![GitHub release](https://img.shields.io/github/v/release/tomck/powercode-node-mcp)](https://github.com/tomck/powercode-node-mcp/releases)
+[![license](https://img.shields.io/npm/l/powercode-mcp)](LICENSE)
+[![node](https://img.shields.io/node/v/powercode-mcp)](package.json)
+
+Published on npm as [`powercode-mcp`](https://www.npmjs.com/package/powercode-mcp): run it with `npx -y powercode-mcp`. Unofficial community project, not affiliated with Powercode.
+
 Read-only MCP server for the [Powercode REST API](https://restapi.powercode.com/). 25 tools covering customers, billing lookups, services, tickets, scheduling, equipment, inventory and system health. Write/delete endpoints are intentionally not exposed yet.
 
 ## Configuration (env vars)
