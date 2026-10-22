@@ -1,6 +1,6 @@
 {
   "name": "powercode-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for the Powercode REST API (ISP/WISP billing and management): customers, tickets, billing, equipment. Read-only by default.",
   "type": "module",
   "bin": {
