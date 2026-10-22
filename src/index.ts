@@ -140,7 +140,7 @@ server.registerTool("get_tickets_by_date", {
   },
   annotations: readOnly,
 }, ({ startDay, endDay, orderBy, page, pageSize }) =>
-  pc("/schedule/ticketsByDate", { startDay, endDay, _orderBy: orderBy, _page: page, _pageSize: pageSize }));
+  pc("/tickets/ticketsByDate", { startDay, endDay, _orderBy: orderBy, _page: page, _pageSize: pageSize }));
 
 // --- Bulk ticket sweep ---
 // The API only exposes tickets by date range, one page at a time. These tools page through the
@@ -167,15 +167,21 @@ async function sweepTickets(startDay: string, endDay: string, maxRows: number, r
   const pageSize = 200;
   const rows: Row[] = [];
   let truncated = false;
+  // The server may return fewer rows per page than requested (it caps at 100), so a short page
+  // doesn't mean the last page. Stop on an empty page, or one that repeats the previous page.
+  let prevFirst: string | undefined;
   for (let p = 1; ; p++) {
-    const url = new URL(baseUrl + "/schedule/ticketsByDate");
+    const url = new URL(baseUrl + "/tickets/ticketsByDate");
     url.search = new URLSearchParams({ startDay, endDay, _page: String(p), _pageSize: String(pageSize) }).toString();
     const res = await fetch(url, { headers: { Authorization: authHeader, Accept: "application/json" } });
     if (!res.ok) throw new Error(`HTTP ${res.status} on page ${p}: ${(await res.text()).slice(0, 500)}`);
     const batch = extractRows(await res.json());
+    if (batch.length === 0) break;
+    const first = JSON.stringify(batch[0]);
+    if (first === prevFirst) break;
+    prevFirst = first;
     rows.push(...batch);
     if (rows.length >= maxRows) { rows.length = maxRows; truncated = true; break; }
-    if (batch.length < pageSize) break;
   }
   const entry = { at: Date.now(), rows, truncated };
   sweepCache.set(key, entry);
