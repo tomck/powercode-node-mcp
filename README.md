@@ -17,7 +17,23 @@ Your server publishes its API spec at `https://<your-server>:444/docs/openapi.js
 - `list_api_endpoints` searches the catalog (`search`) or shows one endpoint's parameters (`path`).
 - `call_api` calls a catalog endpoint with query parameters. It refuses unknown paths, missing required parameters and misspelled ones, and never sends anything but GET.
 
-Left out of the catalog on purpose: RADIUS and email server definitions, device configuration files, `configValue` and license, SAML, Trango, single web-user detail (`/user/user` carries 2FA secrets and API tokens), file downloads, the whole-customer data dump, endpoints that act through GET (sync, sign contract), and the AI and customer-portal (`subscriber`) families.
+About 50 endpoints are **restricted**: RADIUS and email server definitions (shared secrets), device configuration files, `configValue` and license, SAML, Trango, single web-user detail (`/user/user` carries 2FA secrets and API tokens), the whole-customer data dump, endpoints that act through GET (sync, sign contract), and the AI and customer-portal (`subscriber`) families. They are listed, marked `[restricted]`, and refused unless you set the YOLO level below. Binary downloads (`files/download`) aren't callable at any level.
+
+## Access levels
+
+| Level | Enable with | What it adds |
+|---|---|---|
+| **Read** (default) | nothing | The read tools and the safe part of the `call_api` catalog. |
+| **Write** | `POWERCODE_ENABLE_WRITES=1` | The write tools (see below). |
+| **YOLO** | `POWERCODE_YOLO=YOLO` | Everything in Write, plus the restricted `call_api` endpoints. Secrets can be read into your chat transcript, and some of these endpoints act through GET. |
+
+**Local models.** With a model running on your own machine, secrets in the chat transcript never leave it, so YOLO is an easier call than with a hosted service. The other risks stay the same at any level:
+
+- Endpoints that act through GET (server sync, sign contract) do real things whichever model calls them.
+- Smaller local models are more likely to misread a tool or to follow instructions that appear inside ticket text, so keep Write off unless you need it.
+- Powercode's own `ai/*` endpoints send ticket content to the AI provider configured in Powercode, which is separate from your local model; YOLO unlocks them.
+
+YOLO only turns on for the exact value `YOLO`; `1`, `true` and `yolo` don't count. At YOLO, `call_api` stops claiming to be read-only in its MCP annotations, so clients that prompt on destructive tools will prompt on it. The server logs its level to stderr at startup.
 
 After a Powercode upgrade, regenerate the catalog from your server's spec and rebuild:
 
@@ -36,6 +52,7 @@ node scripts/gen-endpoints.mjs openapi.json src/endpoints.ts && npm run build
 | `POWERCODE_USERNAME` / `POWERCODE_PASSWORD` | Alternative to the API key |
 | `POWERCODE_INSECURE_TLS` | Set to `1` to accept a self-signed certificate |
 | `POWERCODE_ENABLE_WRITES` | Set to `1` to expose the write tools (off by default) |
+| `POWERCODE_YOLO` | Set to `YOLO` to include writes and unlock the restricted `call_api` endpoints. See [Access levels](#access-levels). |
 
 ## Triaging large ticket backlogs
 
@@ -54,7 +71,7 @@ The API has no way to fetch one ticket by ID, or to update or close a ticket. A 
 
 ## Write tools (opt-in)
 
-Registered only when `POWERCODE_ENABLE_WRITES=1`. Each carries MCP annotations so clients can prompt before running them.
+Registered only at the Write level (`POWERCODE_ENABLE_WRITES=1`) or above (`POWERCODE_YOLO=YOLO`). Each carries MCP annotations so clients can prompt before running them.
 
 | Tool | Annotation |
 |---|---|

@@ -27,6 +27,12 @@ const authHeader =
   "Basic " + Buffer.from(apiKey ?? `${username}:${password}`).toString("base64");
 const baseUrl = `https://${host}:${port}/uapi`;
 
+// Access levels. Read is the default. Write (POWERCODE_ENABLE_WRITES=1) registers the write tools.
+// YOLO (POWERCODE_YOLO=YOLO) includes Write and also unlocks the restricted catalog endpoints in call_api.
+const yolo = process.env.POWERCODE_YOLO === "YOLO";
+const writesEnabled = yolo || process.env.POWERCODE_ENABLE_WRITES === "1";
+console.error(`powercode-mcp access level: ${yolo ? "YOLO (writes and restricted endpoints)" : writesEnabled ? "write" : "read"}`);
+
 type Param = string | number | boolean | (string | number)[] | undefined;
 
 // The Powercode API takes all parameters in the query string, with arrays as `key[]=a&key[]=b`.
@@ -417,7 +423,8 @@ const findEndpoint = (path: string) => endpoints.find((e) => e.path.toLowerCase(
 
 server.registerTool("list_api_endpoints", {
   description:
-    `List the read-only Powercode API endpoints that call_api can reach (generated from the spec, ${specVersion}). ` +
+    `List the Powercode API endpoints that call_api can reach (generated from the spec, ${specVersion}). ` +
+    "Endpoints marked [restricted] need POWERCODE_YOLO=YOLO. " +
     "Pass `search` to filter by path or description, or `path` for one endpoint's full parameter list.",
   inputSchema: {
     search: z.string().optional().describe("Case-insensitive match against path and description"),
@@ -430,25 +437,31 @@ server.registerTool("list_api_endpoints", {
     return e ? textResult(e) : { isError: true, content: [{ type: "text" as const, text: `${path} is not in the catalog.` }] };
   }
   const q = search?.toLowerCase();
-  const list = endpoints
-    .filter((e) => !q || e.path.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
-    .map((e) => `${e.path}${e.params.some((p) => p.required) ? ` (requires ${e.params.filter((p) => p.required).map((p) => p.name).join(", ")})` : ""} - ${e.summary}`);
-  return textResult({ specVersion, count: list.length, endpoints: list });
+  const matching = endpoints.filter((e) => !q || e.path.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q));
+  const list = matching.map((e) =>
+    `${e.path}${e.params.some((p) => p.required) ? ` (requires ${e.params.filter((p) => p.required).map((p) => p.name).join(", ")})` : ""} - ${e.summary}` +
+    (e.restricted ? ` [restricted: ${e.restricted}${yolo ? "" : "; needs POWERCODE_YOLO=YOLO"}]` : ""));
+  return textResult({ specVersion, accessLevel: yolo ? "YOLO" : writesEnabled ? "write" : "read", count: list.length, endpoints: list });
 });
 
 server.registerTool("call_api", {
   description:
-    "Call any read-only endpoint from list_api_endpoints with query parameters. GET only; paths outside the catalog are refused. " +
+    "Call an endpoint from list_api_endpoints with query parameters. GET only; paths outside the catalog are refused. " +
+    "Endpoints marked [restricted] (secret-bearing, acting through GET, AI) need POWERCODE_YOLO=YOLO. " +
     "Use the dedicated tools where they exist; this covers the rest of the API.",
   inputSchema: {
     path: z.string().describe("Endpoint path from list_api_endpoints, e.g. /customer/contract/contract"),
     params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))])).optional()
       .describe("Query parameters by name, e.g. { customerId: 1 }"),
   },
-  annotations: readOnly,
+  // At YOLO some reachable endpoints act through GET, so the read-only hint would be false.
+  annotations: yolo ? { readOnlyHint: false, destructiveHint: true, openWorldHint: true } : readOnly,
 }, ({ path, params = {} }) => {
   const e = findEndpoint(path);
-  if (!e) return { isError: true, content: [{ type: "text" as const, text: `${path} is not in the read-only catalog. Use list_api_endpoints to see what is available.` }] };
+  if (!e) return { isError: true, content: [{ type: "text" as const, text: `${path} is not in the catalog. Use list_api_endpoints to see what is available.` }] };
+  if (e.restricted && !yolo) {
+    return { isError: true, content: [{ type: "text" as const, text: `${e.path} is restricted (${e.restricted}). Set POWERCODE_YOLO=YOLO in the server's environment to allow it.` }] };
+  }
   const known = new Set(e.params.map((p) => p.name));
   const unknown = Object.keys(params).filter((k) => !known.has(k));
   const missing = e.params.filter((p) => p.required && params[p.name] === undefined).map((p) => p.name);
@@ -522,8 +535,8 @@ server.registerTool("get_dashboard_data", {
   annotations: readOnly,
 }, () => pc("/install/DashboardData"));
 
-// --- Write tools: only registered when POWERCODE_ENABLE_WRITES=1 ---
-if (process.env.POWERCODE_ENABLE_WRITES === "1") {
+// --- Write tools: only registered at the Write level (POWERCODE_ENABLE_WRITES=1) or above (POWERCODE_YOLO=YOLO) ---
+if (writesEnabled) {
   // Creates/updates: not destructive, but they do change records.
   const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
   const update = { ...write, idempotentHint: true };
