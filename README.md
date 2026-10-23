@@ -8,7 +8,23 @@
 
 Published on npm as [`powercode-mcp`](https://www.npmjs.com/package/powercode-mcp): run it with `npx -y powercode-mcp`. Unofficial community project, not affiliated with Powercode.
 
-Read-only MCP server for the [Powercode REST API](https://restapi.powercode.com/). 25 tools covering customers, billing lookups, services, tickets, scheduling, equipment, inventory and system health. Write/delete endpoints are intentionally not exposed yet.
+Read-only MCP server for the [Powercode REST API](https://restapi.powercode.com/). 33 tools by default, covering customers, billing lookups, services, tickets, scheduling, equipment, inventory and system health, plus `call_api` for about 70 more read-only endpoints (see below). Write tools are off unless you opt in.
+
+## The rest of the API: `list_api_endpoints` and `call_api`
+
+Your server publishes its API spec at `https://<your-server>:444/docs/openapi.json`. A catalog of its read-only (GET) endpoints, generated from the V26.10.05 spec, is built into the server:
+
+- `list_api_endpoints` searches the catalog (`search`) or shows one endpoint's parameters (`path`).
+- `call_api` calls a catalog endpoint with query parameters. It refuses unknown paths, missing required parameters and misspelled ones, and never sends anything but GET.
+
+Left out of the catalog on purpose: RADIUS and email server definitions, device configuration files, `configValue` and license, SAML, Trango, single web-user detail (`/user/user` carries 2FA secrets and API tokens), file downloads, the whole-customer data dump, endpoints that act through GET (sync, sign contract), and the AI and customer-portal (`subscriber`) families.
+
+After a Powercode upgrade, regenerate the catalog from your server's spec and rebuild:
+
+```bash
+curl -sk https://<your-server>:444/docs/openapi.json -o openapi.json
+node scripts/gen-endpoints.mjs openapi.json src/endpoints.ts && npm run build
+```
 
 ## Configuration (env vars)
 
@@ -23,12 +39,18 @@ Read-only MCP server for the [Powercode REST API](https://restapi.powercode.com/
 
 ## Triaging large ticket backlogs
 
-The API only lists tickets by date range, one page at a time. Two tools page through the whole range server-side:
+The server returns at most 100 tickets per page, whatever page size you ask for. These tools page through everything server-side:
 
-- `sweep_tickets`: fetches everything, caches it for 10 minutes, and returns a compact slice (`fields`, `contains`, `offset`, `limit`). Call it first with a small `limit` to see the field names and total count.
+- `get_tickets`: filters by `status` (comma-separated, for example `Active,Waiting`), `responsibleUser`, `updatedSince` and `createdSince`. Set `all: true` to fetch every match.
+- `sweep_tickets`: fetches a whole date range, caches it for 10 minutes, and returns a slice (`fields`, `contains`, `offset`, `limit`). Call it first with a small `limit` to see the field names and total count.
 - `export_tickets`: saves the full set to a local `.json` or `.csv` file so an agent with shell access can analyze thousands of rows with scripts instead of reading them in the conversation.
+- `get_ticket_stats`, `get_ticket_stats_by_group` and `get_tickets_by_user` give counts for sizing a backlog.
+
+Pass `compact: true` (the default for `get_tickets` with `all`) to strip HTML, drop log bodies and show idle time in days. Whole ticket rows are large.
 
 Use an early `startDay` to reach old tickets. `maxRows` (default 5000) caps a sweep as a safety limit; the result says if the cap was hit.
+
+The API has no way to fetch one ticket by ID, or to update or close a ticket. A resolved ticket can still show Status `Active`, so check the summary and logs too.
 
 ## Write tools (opt-in)
 

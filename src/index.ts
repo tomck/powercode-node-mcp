@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { endpoints, specVersion } from "./endpoints.js";
 
 // Config comes from env vars so nothing secret lives in the client config file's args.
 const host = process.env.POWERCODE_HOST;
@@ -29,7 +30,7 @@ const baseUrl = `https://${host}:${port}/uapi`;
 type Param = string | number | boolean | (string | number)[] | undefined;
 
 // The Powercode API takes all parameters in the query string, with arrays as `key[]=a&key[]=b`.
-async function pc(path: string, params: Record<string, Param> = {}, method = "GET") {
+async function pc(path: string, params: Record<string, Param> = {}, method = "GET", post?: (body: any) => unknown) {
   const url = new URL(baseUrl + path);
   for (const [k, v] of Object.entries(params)) {
     if (v === undefined || v === "") continue;
@@ -44,7 +45,8 @@ async function pc(path: string, params: Record<string, Param> = {}, method = "GE
     }
     let body = text;
     try {
-      body = JSON.stringify(JSON.parse(text), null, 2);
+      const json = JSON.parse(text);
+      body = JSON.stringify(post ? post(json) : json, null, 2);
     } catch {
       /* not JSON; return as is */
     }
@@ -54,7 +56,7 @@ async function pc(path: string, params: Record<string, Param> = {}, method = "GE
   }
 }
 
-const server = new McpServer({ name: "powercode", version: "0.1.0" });
+const server = new McpServer({ name: "powercode", version: "0.2.0" });
 const readOnly = { readOnlyHint: true, openWorldHint: true };
 
 const customerId = z.number().int().describe("Powercode customer ID");
@@ -129,24 +131,83 @@ server.registerTool("get_services", {
   pc("/services/service", serviceId ? { serviceId } : { _page: page, _pageSize: pageSize }));
 
 // --- Tickets & scheduling ---
+type Row = Record<string, unknown>;
+
+const stripHtml = (s: unknown) =>
+  typeof s === "string"
+    ? s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/\s+/g, " ").trim()
+    : s;
+
+// Whole ticket rows carry HTML bodies and repeat the description in the first log. IdleTime is in seconds.
+// ticketsByDate rows carry TicketLogs and IdleTime; tickets rows carry Created, LastActivity and GroupName instead.
+function compactTicket(t: Row, descriptionChars = 500): Row {
+  const logs = Array.isArray(t.TicketLogs) ? (t.TicketLogs as Row[]) : [];
+  const created = (t.Created as string | undefined) ?? (logs[0]?.Created as string | undefined) ?? null;
+  const lastActivity = (t.LastActivity as string | undefined) ?? (logs[logs.length - 1]?.Created as string | undefined) ?? null;
+  let idleDays: number | null = null;
+  if (t.IdleTime !== undefined && t.IdleTime !== null && Number.isFinite(Number(t.IdleTime))) {
+    idleDays = Math.round(Number(t.IdleTime) / 8640) / 10;
+  } else if (lastActivity) {
+    const ms = Date.parse(lastActivity.replace(" ", "T"));
+    if (Number.isFinite(ms)) idleDays = Math.round((Date.now() - ms) / 8640000) / 10; // approximate: server time zone unknown
+  }
+  const description = stripHtml(t.Description);
+  return {
+    TicketID: t.TicketID,
+    Status: t.Status,
+    Category: t.Category,
+    Priority: t.Priority,
+    Summary: t.Summary,
+    CustomerID: t.CustomerID ?? null,
+    CompanyName: t.CompanyName,
+    ResponsibleUser: t.ResponsibleUser,
+    Group: t.GroupName ?? t.ResponsibleGroupID ?? null,
+    Agent: t.Agent,
+    OpenedFrom: t.OpenedFrom,
+    FollowUp: t.FollowUp ?? null,
+    Created: created,
+    LastActivity: lastActivity,
+    LogCount: Array.isArray(t.TicketLogs) ? logs.length : null,
+    IdleDays: idleDays,
+    Description: typeof description === "string" ? description.slice(0, descriptionChars) : description,
+  };
+}
+// Ticket rows arrive either as Response: [...] or as Response: { tickets: [...], totalCount, ... }.
+const mapTicketRows = (body: any, fn: (t: Row) => Row) => {
+  if (body && Array.isArray(body.Response)) return { ...body, Response: body.Response.map(fn) };
+  if (body && body.Response && Array.isArray(body.Response.tickets)) {
+    return { ...body, Response: { ...body.Response, tickets: body.Response.tickets.map(fn) } };
+  }
+  return body;
+};
+const compactBody = (descriptionChars?: number) => (body: any) => mapTicketRows(body, (t) => compactTicket(t, descriptionChars));
+const pickFields = (r: Row, fields?: string[]): Row => (fields ? Object.fromEntries(fields.map((f) => [f, r[f]])) : r);
+
+const compactOpt = z.boolean().optional().describe("Trimmed plain-text rows: no HTML, no log bodies, idle time in days");
+const descriptionCharsOpt = z.number().int().min(0).max(5000).optional().describe("With compact: max description characters (default 500)");
+
+// Resolved tickets can still carry Status "Active", so check the summary and logs before treating Status as final.
 server.registerTool("get_tickets_by_date", {
-  description: "List tickets in a date range with pagination and ordering.",
+  description: "List tickets in a date range with pagination and ordering. The server returns at most 100 rows per page.",
   inputSchema: {
     startDay: dateStr,
     endDay: dateStr,
     orderBy: z.string().optional().describe("COLUMN DIRECTION, e.g. 'Type DESC'"),
     page,
     pageSize,
+    compact: compactOpt,
+    descriptionChars: descriptionCharsOpt,
   },
   annotations: readOnly,
-}, ({ startDay, endDay, orderBy, page, pageSize }) =>
-  pc("/tickets/ticketsByDate", { startDay, endDay, _orderBy: orderBy, _page: page, _pageSize: pageSize }));
+}, ({ startDay, endDay, orderBy, page, pageSize, compact, descriptionChars }) =>
+  pc("/tickets/ticketsByDate", { startDay, endDay, _orderBy: orderBy, _page: page, _pageSize: pageSize }, "GET",
+    compact ? compactBody(descriptionChars) : undefined));
 
 // --- Bulk ticket sweep ---
-// The API only exposes tickets by date range, one page at a time. These tools page through the
-// whole range server-side so an agent can triage thousands of tickets without each page passing
-// through the conversation.
-type Row = Record<string, unknown>;
+// The API pages tickets 100 rows at a time. These tools page through a whole range or filter
+// server-side so an agent can triage thousands of tickets without each page passing through the
+// conversation.
 const sweepCache = new Map<string, { at: number; rows: Row[]; truncated: boolean }>();
 const SWEEP_TTL_MS = 10 * 60 * 1000;
 
@@ -155,12 +216,22 @@ function extractRows(body: unknown): Row[] {
   if (body && typeof body === "object") {
     const arr = Object.values(body).find(Array.isArray);
     if (arr) return arr as Row[];
+    // Some endpoints nest the rows one level down, e.g. Response: { tickets: [...], totalCount }.
+    for (const v of Object.values(body)) {
+      if (v && typeof v === "object") {
+        const inner = Object.values(v).find(Array.isArray);
+        if (inner) return inner as Row[];
+      }
+    }
   }
   return [];
 }
 
-async function sweepTickets(startDay: string, endDay: string, maxRows: number, refresh: boolean) {
-  const key = `${startDay}|${endDay}|${maxRows}`;
+const sweepTickets = (startDay: string, endDay: string, maxRows: number, refresh: boolean) =>
+  fetchAllPages("/tickets/ticketsByDate", { startDay, endDay }, maxRows, refresh);
+
+async function fetchAllPages(path: string, query: Record<string, string>, maxRows: number, refresh: boolean) {
+  const key = `${path}|${JSON.stringify(query)}|${maxRows}`;
   const hit = sweepCache.get(key);
   if (!refresh && hit && Date.now() - hit.at < SWEEP_TTL_MS) return hit;
 
@@ -171,8 +242,8 @@ async function sweepTickets(startDay: string, endDay: string, maxRows: number, r
   // doesn't mean the last page. Stop on an empty page, or one that repeats the previous page.
   let prevFirst: string | undefined;
   for (let p = 1; ; p++) {
-    const url = new URL(baseUrl + "/tickets/ticketsByDate");
-    url.search = new URLSearchParams({ startDay, endDay, _page: String(p), _pageSize: String(pageSize) }).toString();
+    const url = new URL(baseUrl + path);
+    url.search = new URLSearchParams({ ...query, _page: String(p), _pageSize: String(pageSize) }).toString();
     const res = await fetch(url, { headers: { Authorization: authHeader, Accept: "application/json" } });
     if (!res.ok) throw new Error(`HTTP ${res.status} on page ${p}: ${(await res.text()).slice(0, 500)}`);
     const batch = extractRows(await res.json());
@@ -210,17 +281,22 @@ server.registerTool("sweep_tickets", {
   inputSchema: {
     ...sweepRange,
     contains: z.string().optional().describe("Case-insensitive text match against the whole row"),
-    fields: z.array(z.string()).optional().describe("Only return these fields per row"),
+    fields: z.array(z.string()).optional().describe("Only return these fields per row (applied after compact)"),
+    compact: compactOpt,
+    descriptionChars: descriptionCharsOpt,
     offset: z.number().int().min(0).optional(),
     limit: z.number().int().min(1).max(200).optional().describe("Rows to return (default 50)"),
   },
   annotations: readOnly,
-}, async ({ startDay, endDay, maxRows, refresh, contains, fields, offset = 0, limit = 50 }) => {
+}, async ({ startDay, endDay, maxRows, refresh, contains, fields, compact, descriptionChars, offset = 0, limit = 50 }) => {
   try {
     const { rows, truncated } = await sweepTickets(startDay, endDay, maxRows ?? 5000, refresh ?? false);
+    // `contains` searches the full row (including log text) even when the output is compacted.
     const filtered = rows.filter((r) => matches(r, contains));
-    const slice = filtered.slice(offset, offset + limit).map((r) =>
-      fields ? Object.fromEntries(fields.map((f) => [f, r[f]])) : r);
+    const slice = filtered.slice(offset, offset + limit).map((full) => {
+      const r = compact ? compactTicket(full, descriptionChars) : full;
+      return fields ? Object.fromEntries(fields.map((f) => [f, r[f]])) : r;
+    });
     return textResult({
       totalFetched: rows.length,
       hitMaxRowsCap: truncated,
@@ -243,15 +319,19 @@ server.registerTool("export_tickets", {
     ...sweepRange,
     path: z.string().describe("Absolute output path ending in .json or .csv"),
     overwrite: z.boolean().optional(),
+    compact: compactOpt,
+    descriptionChars: descriptionCharsOpt,
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-}, async ({ startDay, endDay, maxRows, refresh, path, overwrite }) => {
+}, async ({ startDay, endDay, maxRows, refresh, path, overwrite, compact, descriptionChars }) => {
   try {
     const fs = await import("node:fs/promises");
     const nodePath = await import("node:path");
     if (!nodePath.isAbsolute(path) || !/\.(json|csv)$/i.test(path)) throw new Error("path must be absolute and end in .json or .csv");
     if (!overwrite && (await fs.stat(path).then(() => true, () => false))) throw new Error(`${path} already exists; pass overwrite: true`);
-    const { rows, truncated } = await sweepTickets(startDay, endDay, maxRows ?? 5000, refresh ?? false);
+    const swept = await sweepTickets(startDay, endDay, maxRows ?? 5000, refresh ?? false);
+    const truncated = swept.truncated;
+    const rows = compact ? swept.rows.map((r) => compactTicket(r, descriptionChars)) : swept.rows;
     let out: string;
     if (/\.csv$/i.test(path)) {
       const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
@@ -269,6 +349,113 @@ server.registerTool("export_tickets", {
   } catch (e) {
     return errResult(e);
   }
+});
+
+server.registerTool("get_tickets", {
+  description:
+    "List tickets with optional filters for status, responsible user and dates. The server returns at most 100 rows per page; " +
+    "set all=true to page through every match server-side (compact rows by default). " +
+    "Resolved tickets can still show Status 'Active', so check the summary and logs before treating Status as final.",
+  inputSchema: {
+    status: z.string().optional().describe("Comma-separated status names, e.g. 'Active,Waiting,Resolved'"),
+    responsibleUser: z.string().optional().describe("Filter by assigned username"),
+    updatedSince: z.string().optional().describe("Only tickets updated since this date (e.g. YYYY-MM-DD)"),
+    createdSince: z.string().optional().describe("Only tickets created since this date (e.g. YYYY-MM-DD)"),
+    orderBy: z.string().optional().describe("COLUMN DIRECTION, e.g. 'Priority DESC'"),
+    page,
+    pageSize,
+    all: z.boolean().optional().describe("Page through every matching ticket (up to maxRows) instead of returning one page"),
+    maxRows: z.number().int().min(1).max(100000).optional().describe("With all: safety cap on rows fetched (default 5000)"),
+    compact: compactOpt,
+    descriptionChars: descriptionCharsOpt,
+    fields: z.array(z.string()).optional().describe("Only return these fields per row (applied after compact)"),
+  },
+  annotations: readOnly,
+}, async ({ status, responsibleUser, updatedSince, createdSince, orderBy, page, pageSize, all, maxRows, compact, descriptionChars, fields }) => {
+  const filters = { status, responsibleUser, updatedSince, createdSince };
+  if (!all) {
+    return pc("/tickets/tickets", { ...filters, _orderBy: orderBy, _page: page, _pageSize: pageSize }, "GET",
+      compact || fields
+        ? (body) => mapTicketRows(body, (t) => pickFields(compact ? compactTicket(t, descriptionChars) : t, fields))
+        : undefined);
+  }
+  try {
+    const query = Object.fromEntries(Object.entries({ ...filters, _orderBy: orderBy }).filter(([, v]) => v !== undefined && v !== "")) as Record<string, string>;
+    const { rows, truncated } = await fetchAllPages("/tickets/tickets", query, maxRows ?? 5000, true);
+    return textResult({
+      count: rows.length,
+      hitMaxRowsCap: truncated,
+      rows: rows.map((r) => pickFields(compact === false ? r : compactTicket(r, descriptionChars), fields)),
+    });
+  } catch (e) {
+    return { isError: true, content: [{ type: "text" as const, text: `Ticket fetch failed: ${(e as Error).message}` }] };
+  }
+});
+
+server.registerTool("get_ticket_stats", {
+  description: "Aggregate ticket statistics: counts by status and today's activity. Good for sizing a backlog.",
+  inputSchema: {},
+  annotations: readOnly,
+}, () => pc("/tickets/ticketStats"));
+
+server.registerTool("get_ticket_stats_by_group", {
+  description: "Ticket statistics broken down by handler group.",
+  inputSchema: {},
+  annotations: readOnly,
+}, () => pc("/tickets/ticketStatsByGroup"));
+
+server.registerTool("get_tickets_by_user", {
+  description: "Per-user ticket statistics.",
+  inputSchema: {},
+  annotations: readOnly,
+}, () => pc("/tickets/ticketsByUser"));
+
+// --- Generic read access to the rest of the API ---
+// The catalog is generated from the server's OpenAPI spec (GET endpoints only). Credential-bearing,
+// file, AI and GET-as-action endpoints are left out of it, and call_api refuses anything not in it.
+const findEndpoint = (path: string) => endpoints.find((e) => e.path.toLowerCase() === path.toLowerCase());
+
+server.registerTool("list_api_endpoints", {
+  description:
+    `List the read-only Powercode API endpoints that call_api can reach (generated from the spec, ${specVersion}). ` +
+    "Pass `search` to filter by path or description, or `path` for one endpoint's full parameter list.",
+  inputSchema: {
+    search: z.string().optional().describe("Case-insensitive match against path and description"),
+    path: z.string().optional().describe("Exact endpoint path for full parameter details, e.g. /customer/contract/contract"),
+  },
+  annotations: { readOnlyHint: true, openWorldHint: false },
+}, ({ search, path }) => {
+  if (path) {
+    const e = findEndpoint(path);
+    return e ? textResult(e) : { isError: true, content: [{ type: "text" as const, text: `${path} is not in the catalog.` }] };
+  }
+  const q = search?.toLowerCase();
+  const list = endpoints
+    .filter((e) => !q || e.path.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
+    .map((e) => `${e.path}${e.params.some((p) => p.required) ? ` (requires ${e.params.filter((p) => p.required).map((p) => p.name).join(", ")})` : ""} - ${e.summary}`);
+  return textResult({ specVersion, count: list.length, endpoints: list });
+});
+
+server.registerTool("call_api", {
+  description:
+    "Call any read-only endpoint from list_api_endpoints with query parameters. GET only; paths outside the catalog are refused. " +
+    "Use the dedicated tools where they exist; this covers the rest of the API.",
+  inputSchema: {
+    path: z.string().describe("Endpoint path from list_api_endpoints, e.g. /customer/contract/contract"),
+    params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))])).optional()
+      .describe("Query parameters by name, e.g. { customerId: 1 }"),
+  },
+  annotations: readOnly,
+}, ({ path, params = {} }) => {
+  const e = findEndpoint(path);
+  if (!e) return { isError: true, content: [{ type: "text" as const, text: `${path} is not in the read-only catalog. Use list_api_endpoints to see what is available.` }] };
+  const known = new Set(e.params.map((p) => p.name));
+  const unknown = Object.keys(params).filter((k) => !known.has(k));
+  const missing = e.params.filter((p) => p.required && params[p.name] === undefined).map((p) => p.name);
+  if (unknown.length || missing.length) {
+    return { isError: true, content: [{ type: "text" as const, text: `${e.path}: ${missing.length ? `missing required ${missing.join(", ")}. ` : ""}${unknown.length ? `unknown parameter ${unknown.join(", ")}. ` : ""}Known parameters: ${[...known].join(", ") || "none"}.` }] };
+  }
+  return pc(e.path, params);
 });
 
 server.registerTool("get_scheduled_jobs", {
